@@ -216,18 +216,38 @@ namespace ArkaneSystems.WindowsSubsystemForLinux.Genie
             return $"echo {envName}={envValue} >> /run/genie.env\n";
         }
 
+        private static string AppendEnviroment(string envName, string envValue)
+        {
+            return $"{envName}=\"__PLACEHOLDER__:{envValue}\"";
+        }
+
         private static bool EnvironmentExist(string env)
         {
             return Environment.GetEnvironmentVariable(env) != null;
         }
 
+        private static string RecodeSpace(string str)
+        {
+            return str.Replace(" ", "\\ ");
+        }
         private static void insertToPATH(string str)
         {
-            File.AppendText("/run/genie.env").Write($"PATH=\"${{PATH:+${{PATH}}:}}{str}\"");
+            const string path = "/run/genie-path.env";
+            var genieEnv = File.CreateText(path);
+            try
+            {
+                genieEnv.WriteLine(AppendEnviroment("PATH",str));
+                genieEnv.Close();
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine(e);
+                throw;
+            }
         }
         
         //This creates all the “static” environment values, all that are referenced as given names
-        private static void CreateStaticEnv(List<string> environmentToPass, StreamWriter dumpEnvFile)
+        private static void CreateStaticEnv(List<string> environmentToPass, TextWriter dumpEnvFile)
         {
             foreach (var value in environmentToPass)
             {
@@ -243,7 +263,7 @@ namespace ArkaneSystems.WindowsSubsystemForLinux.Genie
         }
         
         // Generate a custom path to pass at the start of Genie
-        private static void CreateCustomPath(List<string> addToPath)
+        private static void CreateCustomPath(List<string> addToPath, StreamWriter dumpEnvFile)
         {
             switch (addToPath.Count)
             {
@@ -313,16 +333,18 @@ namespace ArkaneSystems.WindowsSubsystemForLinux.Genie
                 //If the passEnviroment is disabled we just go back and nothing happens
                 if (!passEnvironment)
                 {
-                    Console.Write("Not passing any environment values to the inside of Genie");
+                    Console.WriteLine("Not passing any environment values to the inside of Genie");
                     return;
                 }
                 if (useFullPath)
                 {
                     insertToPATH(CleanPath());
+                    Console.WriteLine("All of PATH injected to genie");
                 }
                 else if (useCustomPath)
                 {
-                    CreateCustomPath(addToPath);
+                    CreateCustomPath(addToPath,dumpEnvFile);
+                    Console.WriteLine("Selected PATH injected to genie");
                 }
                 else
                 {
@@ -338,6 +360,47 @@ namespace ArkaneSystems.WindowsSubsystemForLinux.Genie
                 Console.WriteLine(e);
                 throw;
             }
+        }
+        
+        
+
+        private static void RunShellWithin(string command, string arguments)
+        {
+            var bashLocation = GetPrefixedPath("/bin/bash");
+            var commandStr = $"{bashLocation} -c \"{command} {arguments}\""; //TODO: remove
+            Console.WriteLine($"comando : \n {commandStr}\n");
+            Chain(commandStr,"");
+        }
+
+        private static void ImportFileToEnviroment(string fileName)
+        {
+            if (File.Exists(GetPrefixedPath(fileName)))
+            {
+                // export "$(xargs -a /run/genie-path.env)"
+                RunShellWithin("export", $"\"$(xargs -a {fileName})\"");
+                //RunShellWithin("set","-a");
+                //RunShellWithin("source", fileName);
+                //RunShellWithin("set","+a");
+            }
+            else
+            {
+                Console.WriteLine($"The file {fileName} don't exist\n Skiping");
+            }
+        }
+        
+        private static void ImportPath()
+        {
+            var pathFileDir = "/run/genie-path.env";
+            var pathFileText = File.ReadAllText(pathFileDir);
+            pathFileText = pathFileText.Replace("__PLACEHOLDER__", GetCurrentPath());
+            File.WriteAllText(pathFileDir, pathFileText);
+            ImportFileToEnviroment("/run/genie-path.env");
+        }
+
+        private static string GetCurrentPath()
+        {
+            string path = Environment.GetEnvironmentVariable("PATH");;
+            return path;
         }
         
         // Do the work of initializing the bottle.
@@ -394,13 +457,15 @@ namespace ArkaneSystems.WindowsSubsystemForLinux.Genie
 
             Chain ("/usr/sbin/daemonize", "/usr/bin/unshare -fp --propagation shared --mount-proc /lib/systemd/systemd",
                    "initializing bottle failed; daemonize");
-
+            
             // Wait for systemd to be up. (Polling, sigh.)
             do
             {
                 Thread.Sleep (500);
                 systemdPid = GetSystemdPid();
             } while (systemdPid == 0);
+            Thread.Sleep (1000);
+            ImportPath();
         }
 
         // Previous UID while rootified.
@@ -462,6 +527,11 @@ namespace ArkaneSystems.WindowsSubsystemForLinux.Genie
             else
               Console.WriteLine ("genie: environment file missing; continuing anyway");
 
+            if (verbose)
+            {
+                Console.WriteLine($"envars = {envars}");
+                Console.WriteLine($"envnames = {envnames}");
+            }
             Chain ("/usr/bin/nsenter",
                    $"-t {systemdPid} -m -p /usr/bin/env {envars.ToString()} /sbin/runuser -l {realUserName} -w {envnames.ToString()}",
                    "starting shell failed; nsenter");
